@@ -161,8 +161,8 @@ Got questions or need help? Don't hesitate to add an issue on this repo and we c
 
 If you find our work useful and would like to support us, feel free to make a donation using the addresses below:
 
-- BTC (Bitcoin): `bc1qxjpfszwvy3ty33weu6tjkr394uq30jwkysp4x0`
-- ETH (Ethereum): `0xAF3ADE79B7304784049D200ea50352D1C717d7f2`
+- BTC (Bitcoin): `12ZkU4fUot5C1f7TiyU9GVVskjYnzP3AUs`
+- ETH (Ethereum): `0x250c9b83534c461eb87f97e7b995325226871c51`
 
 Thank you for your support!
 
@@ -172,10 +172,11 @@ Thank you for your support!
 
 We love contributions! Here's how you can join the fun:
 
-1. **Fork the repository** to your own GitHub account.
-2. **Create a new branch** for your feature or bug fix.
-3. **Make your changes** and commit them with clear messages.
-4. **Submit a pull request** for review. Let's make this bot even better together!
+1. **Big Shoutout** for project original owner [**@Woahai321**](https://github.com/Woahai321)
+2. **Fork the repository** to your own GitHub account.
+3. **Create a new branch** for your feature or bug fix.
+4. **Make your changes** and commit them with clear messages.
+5. **Submit a pull request** for review. Let's make this bot even better together!
 
 ---
 
