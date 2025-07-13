@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 import getpass
+import msvcrt
 
 init(autoreset=True)
 
@@ -216,12 +217,21 @@ class TelegramForwarder:
             print(gradient_text("Type 'exit' and press Enter to stop forwarding and return to the main menu.", MAIN_COLOR_START, MAIN_COLOR_END))
 
             # Check for user input to exit
-            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-                line = input().strip()
-                if line.lower() == 'exit':
-                    print(gradient_text("Stopping message forwarding...", MAIN_COLOR_START, MAIN_COLOR_END))
-                    self.running = False
-                    break
+            if os.name == 'nt':
+                # Windows: check if a key has been pressed
+                if msvcrt.kbhit():
+                    line = input().strip()
+                    if line.lower() == 'exit':
+                        print(gradient_text("Stopping message forwarding...", MAIN_COLOR_START, MAIN_COLOR_END))
+                        self.running = False
+                        break
+            else:
+                if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                    line = input().strip()
+                    if line.lower() == 'exit':
+                        print(gradient_text("Stopping message forwarding...", MAIN_COLOR_START, MAIN_COLOR_END))
+                        self.running = False
+                        break
 
             try:
                 for chat_id in source_chat_ids:
