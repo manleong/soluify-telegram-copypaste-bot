@@ -194,12 +194,19 @@ class TelegramForwarder:
             return
 
         dialogs = await self.client.get_dialogs()
+        out_path = f"chats_of_{self.phone_number}.txt"
         
-        with open(f"chats_of_{self.phone_number}.txt", "w") as chats_file, tqdm(total=len(dialogs), bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}", ncols=75, colour="blue") as pbar:
+        with open(out_path, "w", encoding="utf-8") as chats_file, tqdm(total=len(dialogs), bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}", ncols=75, colour="blue") as pbar:
             for dialog in dialogs:
-                chat_info = f"Chat ID: {dialog.id}, Title: {dialog.title}"
+                raw_title = dialog.title or ""
+
+                # 1) Save the full title to file
+                chats_file.write(f"Chat ID: {dialog.id}, Title: {raw_title}\n")
+
+                # 2) Console output
+                chat_info = f"Chat ID: {dialog.id}, Title: {raw_title}"
                 print(gradient_text(chat_info, MAIN_COLOR_START, MAIN_COLOR_END))
-                chats_file.write(chat_info + "\n")
+
                 pbar.update(1)
         
         print(gradient_text("All your chats are listed! Time to choose your favorites!", SUCCESS_COLOR, SUCCESS_COLOR, "🎉"))
