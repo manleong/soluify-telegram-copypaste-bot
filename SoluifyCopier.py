@@ -218,6 +218,10 @@ class TelegramForwarder:
         self.running = True
         last_message_ids = {chat_id: (await self.client.get_messages(chat_id, limit=1))[0].id for chat_id in source_chat_ids}
 
+        # Ensure base media folder exists
+        media_base = os.path.join(os.getcwd(), 'media')
+        os.makedirs(media_base, exist_ok=True)
+
         while self.running:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(gradient_text(f"[{timestamp}] Soluify is on the lookout for new messages...", MAIN_COLOR_START, MAIN_COLOR_END, "👀"))
@@ -242,7 +246,16 @@ class TelegramForwarder:
 
             try:
                 for chat_id in source_chat_ids:
-                    messages = await self.client.get_messages(chat_id, min_id=last_message_ids[chat_id], limit=None)
+                    # make per-chat media folder
+                    chat_media_dir = os.path.join(media_base, str(chat_id))
+                    os.makedirs(chat_media_dir, exist_ok=True)
+
+                    # fetch only new messages
+                    messages = await self.client.get_messages(
+                        chat_id,
+                        min_id=last_message_ids[chat_id],
+                        limit=None
+                    )
 
                     for message in reversed(messages):
                         should_forward = False
@@ -259,8 +272,18 @@ class TelegramForwarder:
                             if message.media:
                                 # Download the media
                                 media_path = await self.client.download_media(message.media)
+                                # Build a deterministic, per-chat filename so we never re-download
+                                # Telethon will append the correct extension for you
+                                target = os.path.join(chat_media_dir, f"{message.id}")
+                                if not os.path.exists(target):
+                                    media_path = await self.client.download_media(message.media, file=target)
+                                    logger.info(f"Downloaded media for msg {message.id} to {media_path}")
+                                else:
+                                    media_path = target
+                                    logger.info(f"Using existing media for msg {message.id} at {media_path}")
+
+                                # Re-upload the media with your signature
                                 for dest_id in destination_channel_ids:
-                                    # Re-upload the media with a new message
                                     await self.client.send_file(dest_id, media_path, caption=f"{message.text}\n\n**{signature}**" if message.text else f"**{signature}**")
                         
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
