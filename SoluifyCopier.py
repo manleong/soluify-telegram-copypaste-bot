@@ -37,6 +37,7 @@ MAIN_COLOR_START = (147, 112, 219)  # Medium Purple
 MAIN_COLOR_END = (0, 191, 255)      # Deep Sky Blue
 ALERT_COLOR = (255, 69, 0)          # Red-Orange
 SUCCESS_COLOR = (50, 205, 50)       # Lime Green
+INFO_COLOR = (0, 128, 128)          # Teal
 PROMPT_COLOR_START = (0, 255, 255)  # Cyan
 PROMPT_COLOR_END = (135, 206, 250)  # Light Sky Blue
 
@@ -246,10 +247,6 @@ class TelegramForwarder:
 
             try:
                 for chat_id in source_chat_ids:
-                    # make per-chat media folder
-                    chat_media_dir = os.path.join(media_base, str(chat_id))
-                    os.makedirs(chat_media_dir, exist_ok=True)
-
                     # fetch only new messages
                     messages = await self.client.get_messages(
                         chat_id,
@@ -266,26 +263,47 @@ class TelegramForwarder:
                             should_forward = True
 
                         if should_forward and not any(word.lower() in message.text.lower() for word in self.blacklist):
-                            if message.text:
+                            if message.media:
+                                # Ensure per‑chat media folder exists
+                                chat_media_dir = os.path.join(media_base, str(chat_id))
+                                os.makedirs(chat_media_dir, exist_ok=True)
+
+                                # Look for any existing file in that folder
+                                import glob
+                                existing = glob.glob(os.path.join(chat_media_dir, f"*{message.id}*"))
+                                if existing:
+                                    path = existing[0]
+                                    print(gradient_text(f"Reusing media msg={message.id} from {path}", INFO_COLOR, INFO_COLOR))
+                                else:
+                                    # Download once into chat_media_dir, preserving original filename
+                                    try:
+                                        path = await self.client.download_media(message.media, file=chat_media_dir)
+                                        print(gradient_text(f"Downloaded media msg={message.id} → {path}", INFO_COLOR, INFO_COLOR))
+                                    except Exception as e:
+                                        logger.error(f"Failed to download media for msg {message.id}: {e}")
+                                        continue  # skip forwarding this media
+
+                                # Forward the file (with optional caption)
+                                # Build caption only if there's text or a non‑empty signature
+                                raw_text = message.text or ""
+                                if raw_text:
+                                    caption = f"{raw_text}\n\n{signature}"
+                                elif signature:
+                                    caption = signature
+                                else:
+                                    caption = None
+
+                                for dest_id in destination_channel_ids:
+                                    if isinstance(caption, str) and caption.strip() != "":
+                                        # Send with a plain-text caption
+                                        await self.client.send_file(dest_id, path, caption=caption)
+                                    else:
+                                        # Send the file only
+                                        await self.client.send_file(dest_id, path)
+                            elif  message.text:
                                 for dest_id in destination_channel_ids:
                                     await self.client.send_message(dest_id, message.message + f"\n\n**{signature}**")
-                            if message.media:
-                                # Download the media
-                                media_path = await self.client.download_media(message.media)
-                                # Build a deterministic, per-chat filename so we never re-download
-                                # Telethon will append the correct extension for you
-                                target = os.path.join(chat_media_dir, f"{message.id}")
-                                if not os.path.exists(target):
-                                    media_path = await self.client.download_media(message.media, file=target)
-                                    logger.info(f"Downloaded media for msg {message.id} to {media_path}")
-                                else:
-                                    media_path = target
-                                    logger.info(f"Using existing media for msg {message.id} at {media_path}")
 
-                                # Re-upload the media with your signature
-                                for dest_id in destination_channel_ids:
-                                    await self.client.send_file(dest_id, media_path, caption=f"{message.text}\n\n**{signature}**" if message.text else f"**{signature}**")
-                        
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         print(gradient_text(f"[{timestamp}] Message forwarded with your signature!", SUCCESS_COLOR, SUCCESS_COLOR, "✅"))
 
