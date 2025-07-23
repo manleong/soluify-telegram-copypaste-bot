@@ -74,7 +74,7 @@ Fire up your terminal and follow these steps:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Woahai321/soluify-telegram-copypaste-bot.git
+git clone https://github.com/manleong/soluify-telegram-copypaste-bot.git
 cd soluify-telegram-copypaste-bot
 
 # Install dependencies
