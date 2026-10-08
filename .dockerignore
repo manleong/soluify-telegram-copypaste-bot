@@ -1,0 +1,13 @@
+.git
+dev/
+__pycache__/
+*.pyc
+*.pyo
+data/
+*.session
+credentials.json
+telegramconfiguration.json
+soluify.log
+chats_of_*.txt
+.DS_Store
+.env

@@ -9,18 +9,17 @@
 # ------------------------------------------------------------------------------
 import asyncio
 import random
-import re
 import sys
-import time
 import json
-import signal
 import logging
 import os
 import select
-from datetime import datetime
-from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, FloodWaitError, RPCError, ChatForwardsRestrictedError
-from colorama import init, Fore, Style
+import signal
+import glob
+from datetime import datetime, timedelta
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError, FloodWaitError, RPCError
+from colorama import init
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 from cryptography.fernet import Fernet
@@ -28,7 +27,6 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 import getpass
-import msvcrt
 
 init(autoreset=True)
 
@@ -41,12 +39,18 @@ INFO_COLOR = (0, 128, 128)          # Teal
 PROMPT_COLOR_START = (0, 255, 255)  # Cyan
 PROMPT_COLOR_END = (135, 206, 250)  # Light Sky Blue
 
-CONFIG_FILE = 'telegramconfiguration.json'
-CREDENTIALS_FILE = 'credentials.json'
-LOG_FILE = 'soluify.log'
+# All runtime files go to DATA_DIR (defaults to ./data, overridden by env var in Docker)
+DATA_DIR = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data'))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+CONFIG_FILE = os.path.join(DATA_DIR, 'telegramconfiguration.json')
+CREDENTIALS_FILE = os.path.join(DATA_DIR, 'credentials.json')
+LOG_FILE = os.path.join(DATA_DIR, 'soluify.log')
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
+MEDIA_RETENTION_DAYS = int(os.environ.get('MEDIA_RETENTION_DAYS', '3'))
+HEARTBEAT_MINUTES = int(os.environ.get('HEARTBEAT_MINUTES', '10'))  # headless status line; 0 = off
 
 def setup_logger():
     logger = logging.getLogger('soluify')
@@ -66,6 +70,28 @@ def setup_logger():
     logger.addHandler(console_handler)
     
     return logger
+
+def cleanup_old_media():
+    """Remove media files older than MEDIA_RETENTION_DAYS."""
+    if MEDIA_RETENTION_DAYS <= 0:
+        return
+    media_base = os.path.join(DATA_DIR, 'media')
+    if not os.path.exists(media_base):
+        return
+    cutoff = datetime.now() - timedelta(days=MEDIA_RETENTION_DAYS)
+    removed = 0
+    for root, dirs, files in os.walk(media_base):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                if datetime.fromtimestamp(os.path.getmtime(fpath)) < cutoff:
+                    os.remove(fpath)
+                    removed += 1
+            except OSError as e:
+                logger.error(f"Failed to remove old media {fpath}: {e}")
+    if removed:
+        print(gradient_text(f"Media housekeeping: removed {removed} file(s) older than {MEDIA_RETENTION_DAYS} days", INFO_COLOR, INFO_COLOR, "🧹"))
+        logger.error(f"Media housekeeping: removed {removed} file(s) older than {MEDIA_RETENTION_DAYS} days")
 
 logger = setup_logger()
 
@@ -92,24 +118,38 @@ async def animated_transition(text, duration=0.5):
         await asyncio.sleep(0.05)
     print()
 
-def get_key(password):
+def get_key(password: str, salt: bytes) -> bytes:
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=b'soluify_salt',  # In production, use a random salt and store it
+        salt=salt,
         iterations=100000,
     )
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
-def encrypt_data(data, password):
-    key = get_key(password)
+def encrypt_data(data: dict, password: str) -> str:
+    salt = os.urandom(16)
+    key = get_key(password, salt)
     f = Fernet(key)
-    return f.encrypt(json.dumps(data).encode())
+    encrypted = f.encrypt(json.dumps(data).encode())
+    return salt.hex() + ":" + encrypted.decode()
 
-def decrypt_data(encrypted_data, password):
-    key = get_key(password)
+LEGACY_SALT = b'soluify_salt'  # fixed salt used by credentials files written before v1.0
+
+def is_legacy_token(token: str) -> bool:
+    # New format is "<salt_hex>:<fernet_token>"; legacy is a bare Fernet token (never contains ':')
+    return ":" not in token
+
+def decrypt_data(token: str, password: str) -> dict:
+    token = token.strip()
+    if is_legacy_token(token):
+        salt, encrypted = LEGACY_SALT, token
+    else:
+        salt_hex, encrypted = token.split(":", 1)
+        salt = bytes.fromhex(salt_hex)
+    key = get_key(password, salt)
     f = Fernet(key)
-    return json.loads(f.decrypt(encrypted_data).decode())
+    return json.loads(f.decrypt(encrypted.encode()).decode())
 
 def store_credentials():
     # Display the security warning first
@@ -139,22 +179,28 @@ def store_credentials():
             'phone_number': phone_number
         }
         encrypted_data = encrypt_data(credentials, password)
-        with open(CREDENTIALS_FILE, 'wb') as f:
+        with open(CREDENTIALS_FILE, 'w') as f:
             f.write(encrypted_data)
         print(gradient_text("Credentials saved and encrypted.", SUCCESS_COLOR, SUCCESS_COLOR, "🔐"))
     else:
         print(gradient_text("Credentials will not be saved. They will be deleted when you exit the script.", MAIN_COLOR_START, MAIN_COLOR_END))
 
-    return save_choice.lower() == 'y'
+    return api_id, api_hash, phone_number, save_choice.lower() == 'y'
 
 def read_credentials():
     if os.path.exists(CREDENTIALS_FILE):
         password = getpass.getpass(gradient_text("Enter your password to decrypt credentials: ", PROMPT_COLOR_START, PROMPT_COLOR_END))
         try:
-            with open(CREDENTIALS_FILE, 'rb') as f:
-                encrypted_data = f.read()
-            credentials = decrypt_data(encrypted_data, password)
+            with open(CREDENTIALS_FILE, 'r') as f:
+                token = f.read()
+            credentials = decrypt_data(token, password)
             print(gradient_text("Credentials successfully decrypted! Welcome back!", SUCCESS_COLOR, SUCCESS_COLOR, "🎉"))
+            if is_legacy_token(token.strip()):
+                # Re-encrypt with a random salt; keep the old file as a backup
+                os.replace(CREDENTIALS_FILE, CREDENTIALS_FILE + '.legacy.bak')
+                with open(CREDENTIALS_FILE, 'w') as f:
+                    f.write(encrypt_data(credentials, password))
+                print(gradient_text("Credentials upgraded to the new encryption format.", SUCCESS_COLOR, SUCCESS_COLOR, "🔐"))
             return credentials['api_id'], credentials['api_hash'], credentials['phone_number']
         except Exception as e:
             logger.error(f"Error reading credentials: {e}")
@@ -165,17 +211,39 @@ def read_credentials():
         return None, None, None
 
 class TelegramForwarder:
-    def __init__(self, client, phone_number):
+    def __init__(self, client, phone_number, interactive=True):
         self.client = client
         self.phone_number = phone_number
         self.blacklist = []
         self.running = False
+        # False in headless mode: never prompt, never read stdin
+        self.interactive = interactive
+
+    def _status(self, text, color, emoji=None):
+        # Headless stdout is already timestamped by TimestampedStream
+        if self.interactive:
+            text = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}"
+        print(gradient_text(text, color, color, emoji))
+
+    @staticmethod
+    def _preview(message, limit=60):
+        text = " ".join((message.text or "").split())
+        if len(text) > limit:
+            text = text[:limit] + "…"
+        if message.media:
+            text = f"[media] {text}".strip()
+        return f'"{text}"' if text else "(empty)"
 
     async def connect_with_retry(self):
         for attempt in range(MAX_RETRIES):
             try:
                 await self.client.connect()
                 if not await self.client.is_user_authorized():
+                    if not self.interactive:
+                        # Can't type a login code without a terminal; retrying won't help
+                        logger.error("Session is not authorized. Run the interactive setup once to log in (see README).")
+                        print(gradient_text("Session is not authorized. Run the interactive setup once to log in (see README).", ALERT_COLOR, ALERT_COLOR))
+                        return False
                     await self.client.send_code_request(self.phone_number)
                     try:
                         await self.client.sign_in(self.phone_number, getpass.getpass(gradient_text('Enter the code: ', PROMPT_COLOR_START, PROMPT_COLOR_END)))
@@ -195,7 +263,7 @@ class TelegramForwarder:
             return
 
         dialogs = await self.client.get_dialogs()
-        out_path = f"chats_of_{self.phone_number}.txt"
+        out_path = os.path.join(DATA_DIR, f"chats_of_{self.phone_number}.txt")
         
         with open(out_path, "w", encoding="utf-8") as chats_file, tqdm(total=len(dialogs), bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}", ncols=75, colour="blue") as pbar:
             for dialog in dialogs:
@@ -217,20 +285,34 @@ class TelegramForwarder:
             return
 
         self.running = True
-        last_message_ids = {chat_id: (await self.client.get_messages(chat_id, limit=1))[0].id for chat_id in source_chat_ids}
+        last_message_ids = {}
+        for chat_id in source_chat_ids:
+            latest = await self.client.get_messages(chat_id, limit=1)
+            last_message_ids[chat_id] = latest[0].id if latest else 0
 
-        # Ensure base media folder exists
-        media_base = os.path.join(os.getcwd(), 'media')
+        # Ensure base media folder exists inside DATA_DIR
+        media_base = os.path.join(DATA_DIR, 'media')
         os.makedirs(media_base, exist_ok=True)
 
-        while self.running:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(gradient_text(f"[{timestamp}] Soluify is on the lookout for new messages...", MAIN_COLOR_START, MAIN_COLOR_END, "👀"))
-            print(gradient_text("Type 'exit' and press Enter to stop forwarding and return to the main menu.", MAIN_COLOR_START, MAIN_COLOR_END))
+        last_cleanup = datetime.now()
+        last_heartbeat = datetime.now()
+        forwarded_since_heartbeat = 0
 
-            # Check for user input to exit
-            if os.name == 'nt':
+        if not self.interactive:
+            print(gradient_text(f"Forwarding {source_chat_ids} -> {destination_channel_ids}. Polling every 5 seconds, status every {HEARTBEAT_MINUTES} min.", SUCCESS_COLOR, SUCCESS_COLOR, "👀"))
+
+        while self.running:
+            if self.interactive:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(gradient_text(f"[{timestamp}] Soluify is on the lookout for new messages...", MAIN_COLOR_START, MAIN_COLOR_END, "👀"))
+                print(gradient_text("Type 'exit' and press Enter to stop forwarding and return to the main menu.", MAIN_COLOR_START, MAIN_COLOR_END))
+
+            # Check for user input to exit (headless mode is stopped by SIGTERM instead)
+            if not self.interactive:
+                pass
+            elif os.name == 'nt':
                 # Windows: check if a key has been pressed
+                import msvcrt
                 if msvcrt.kbhit():
                     line = input().strip()
                     if line.lower() == 'exit':
@@ -255,36 +337,41 @@ class TelegramForwarder:
                     )
 
                     for message in reversed(messages):
-                        should_forward = False
-                        if keywords:
-                            if message.text and any(keyword.lower() in message.text.lower() for keyword in keywords):
-                                should_forward = True
-                        else:
-                            should_forward = True
+                        msg_text = message.text or ""
+                        source = f"msg {message.id} from {chat_id}"
+                        preview = self._preview(message)
 
-                        if should_forward and not any(word.lower() in message.text.lower() for word in self.blacklist):
+                        # Log one line per incoming message, forwarded or not
+                        if keywords and not any(keyword.lower() in msg_text.lower() for keyword in keywords):
+                            self._status(f"Skipped {source} (no keyword match): {preview}", INFO_COLOR, "⏭️")
+                        elif any(word.lower() in msg_text.lower() for word in self.blacklist):
+                            self._status(f"Skipped {source} (blacklisted word): {preview}", INFO_COLOR, "🚫")
+                        elif not message.media and not message.text:
+                            self._status(f"Skipped {source} (nothing to copy, e.g. a service message)", INFO_COLOR, "⏭️")
+                        else:
                             if message.media:
-                                # Ensure per‑chat media folder exists
+                                # Ensure per-chat media folder exists
                                 chat_media_dir = os.path.join(media_base, str(chat_id))
                                 os.makedirs(chat_media_dir, exist_ok=True)
 
-                                # Look for any existing file in that folder
-                                import glob
-                                existing = glob.glob(os.path.join(chat_media_dir, f"*{message.id}*"))
+                                # Files are named <message.id>.<ext>, so match that exactly
+                                media_stem = os.path.join(chat_media_dir, str(message.id))
+                                existing = glob.glob(glob.escape(media_stem) + ".*")
+                                if os.path.isfile(media_stem):
+                                    existing.append(media_stem)
                                 if existing:
                                     path = existing[0]
                                     print(gradient_text(f"Reusing media msg={message.id} from {path}", INFO_COLOR, INFO_COLOR))
                                 else:
-                                    # Download once into chat_media_dir, preserving original filename
+                                    # Download once into chat_media_dir; Telethon appends the extension
                                     try:
-                                        path = await self.client.download_media(message.media, file=chat_media_dir)
+                                        path = await self.client.download_media(message.media, file=media_stem)
                                         print(gradient_text(f"Downloaded media msg={message.id} → {path}", INFO_COLOR, INFO_COLOR))
                                     except Exception as e:
                                         logger.error(f"Failed to download media for msg {message.id}: {e}")
                                         continue  # skip forwarding this media
 
-                                # Forward the file (with optional caption)
-                                # Build caption only if there's text or a non‑empty signature
+                                # Build caption only if there's text or a non-empty signature
                                 raw_text = message.text or ""
                                 if raw_text:
                                     caption = f"{raw_text}\n\n{signature}"
@@ -295,17 +382,15 @@ class TelegramForwarder:
 
                                 for dest_id in destination_channel_ids:
                                     if isinstance(caption, str) and caption.strip() != "":
-                                        # Send with a plain-text caption
                                         await self.client.send_file(dest_id, path, caption=caption)
                                     else:
-                                        # Send the file only
                                         await self.client.send_file(dest_id, path)
-                            elif  message.text:
+                            else:
                                 for dest_id in destination_channel_ids:
-                                    await self.client.send_message(dest_id, message.message + f"\n\n**{signature}**")
+                                    await self.client.send_message(dest_id, message.text + f"\n\n**{signature}**")
 
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(gradient_text(f"[{timestamp}] Message forwarded with your signature!", SUCCESS_COLOR, SUCCESS_COLOR, "✅"))
+                            self._status(f"Forwarded {source} -> {destination_channel_ids}: {preview}", SUCCESS_COLOR, "✅")
+                            forwarded_since_heartbeat += 1
 
                         last_message_ids[chat_id] = max(last_message_ids[chat_id], message.id)
 
@@ -321,6 +406,17 @@ class TelegramForwarder:
                 print(gradient_text(f"Unexpected twist in our adventure: {e}", ALERT_COLOR, ALERT_COLOR))
 
             await asyncio.sleep(5)
+
+            # Headless status line so `docker logs` shows the bot is alive
+            if not self.interactive and HEARTBEAT_MINUTES > 0 and (datetime.now() - last_heartbeat).total_seconds() >= HEARTBEAT_MINUTES * 60:
+                self._status(f"Still running: {forwarded_since_heartbeat} message(s) forwarded in the last {HEARTBEAT_MINUTES} min", INFO_COLOR, "💓")
+                last_heartbeat = datetime.now()
+                forwarded_since_heartbeat = 0
+
+            # Periodic media housekeeping (every 24 hours)
+            if (datetime.now() - last_cleanup).total_seconds() >= 86400:
+                cleanup_old_media()
+                last_cleanup = datetime.now()
 
 def load_profiles():
     try:
@@ -362,7 +458,13 @@ def edit_profile(profile_name):
     save_profile(profile_name, config)
     print(gradient_text(f"Profile '{profile_name}' has been updated.", SUCCESS_COLOR, SUCCESS_COLOR, "✅"))
 
-async def graceful_shutdown(credentials_saved, phone_number):
+async def graceful_shutdown(client, credentials_saved, phone_number):
+    # Release the session file before we (possibly) delete it
+    try:
+        await client.disconnect()
+    except Exception as e:
+        logger.error(f"Error while disconnecting: {e}")
+
     if credentials_saved:
         print(gradient_text("Your encrypted credentials will be kept for future use.", MAIN_COLOR_START, MAIN_COLOR_END, "🔒"))
     else:
@@ -374,24 +476,20 @@ async def graceful_shutdown(credentials_saved, phone_number):
     
     if confirm.lower() == 'y':
         if not credentials_saved:
-            try:
-                os.remove(CREDENTIALS_FILE)
-                os.remove(f'session_{phone_number}.session')
-                print(gradient_text("Temporary credentials and session files have been deleted.", SUCCESS_COLOR, SUCCESS_COLOR, "✅"))
-            except Exception as e:
-                logger.error(f"Error while deleting files: {e}")
-                print(gradient_text(f"Error while deleting files: {e}", ALERT_COLOR, ALERT_COLOR))
+            # Delete each file independently so one missing file doesn't leave the other behind
+            session_file = os.path.join(DATA_DIR, f'session_{phone_number}.session')
+            for path in (CREDENTIALS_FILE, session_file):
+                if not os.path.exists(path):
+                    continue
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    logger.error(f"Error while deleting {path}: {e}")
+                    print(gradient_text(f"Error while deleting {path}: {e}", ALERT_COLOR, ALERT_COLOR))
+            print(gradient_text("Temporary credentials and session files have been deleted.", SUCCESS_COLOR, SUCCESS_COLOR, "✅"))
         print(gradient_text("Soluify is signing off. Your choices have been applied. Stay safe!", SUCCESS_COLOR, SUCCESS_COLOR, "🌙"))
     else:
         print(gradient_text("Operation cancelled. No changes were made to your credentials.", MAIN_COLOR_START, MAIN_COLOR_END))
-        if credentials_saved:
-            # If the user previously chose to save credentials but now decides not to, delete the credentials file
-            try:
-                os.remove(CREDENTIALS_FILE)
-                print(gradient_text("Credentials file has been deleted as per your request.", SUCCESS_COLOR, SUCCESS_COLOR, "✅"))
-            except Exception as e:
-                logger.error(f"Error while deleting credentials file: {e}")
-                print(gradient_text(f"Error while deleting credentials file: {e}", ALERT_COLOR, ALERT_COLOR))
         print(gradient_text("Please run the script again if you want to make changes.", MAIN_COLOR_START, MAIN_COLOR_END))
 
     # Add a final confirmation before exiting
@@ -512,16 +610,18 @@ Welcome to the Soluify Telegram Copy & Paste Bot!
 
     print(intro_text)
 
+    cleanup_old_media()
+
     api_id, api_hash, phone_number = read_credentials()
 
     if api_id is None or api_hash is None or phone_number is None:
         print(gradient_text("Let's set up your Telegram API credentials!", MAIN_COLOR_START, MAIN_COLOR_END, "🚀"))
-        credentials_saved = store_credentials()
-        api_id, api_hash, phone_number = read_credentials()
+        api_id, api_hash, phone_number, credentials_saved = store_credentials()
     else:
         credentials_saved = True
 
-    client = TelegramClient('session_' + phone_number, api_id, api_hash)
+    session_path = os.path.join(DATA_DIR, 'session_' + phone_number)
+    client = TelegramClient(session_path, api_id, api_hash)
     forwarder = TelegramForwarder(client, phone_number)
 
     while True:
@@ -559,6 +659,7 @@ Welcome to the Soluify Telegram Copy & Paste Bot!
                 else:
                     source_chat_ids, destination_channel_ids, keywords, signature, blacklist = get_new_config()
                 
+                forwarder.blacklist = blacklist
                 await animated_transition("Preparing the message wormhole")
                 await forwarder.forward_messages_to_channels(source_chat_ids, destination_channel_ids, keywords, signature)
             elif choice == "3":
@@ -575,7 +676,7 @@ Welcome to the Soluify Telegram Copy & Paste Bot!
             elif choice == "4":
                 await display_help()
             elif choice == "5":
-                await graceful_shutdown(credentials_saved, phone_number)
+                await graceful_shutdown(client, credentials_saved, phone_number)
                 break
             else:
                 print(gradient_text("Oops! That's not on the menu. Let's try again!", ALERT_COLOR, ALERT_COLOR, "❌"))
@@ -606,7 +707,83 @@ def get_new_config():
         })
     return source_chat_ids, destination_channel_ids, keywords, signature, blacklist
 
+class TimestampedStream:
+    """Prefixes every line written to the wrapped stream with the local time, for `docker logs`."""
+    def __init__(self, stream):
+        self.stream = stream
+        self.at_line_start = True
+
+    def write(self, text):
+        out = []
+        for chunk in text.splitlines(keepends=True):
+            if self.at_line_start:
+                out.append(datetime.now().strftime("[%Y-%m-%d %H:%M:%S] "))
+            out.append(chunk)
+            self.at_line_start = chunk.endswith('\n')
+        self.stream.write(''.join(out))
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+async def run_headless():
+    """Unattended mode for Docker: credentials and profile come from env vars, no prompts."""
+    if not isinstance(sys.stdout, TimestampedStream):
+        sys.stdout = TimestampedStream(sys.stdout)
+    api_id = os.environ.get('TG_API_ID', '').strip()
+    api_hash = os.environ.get('TG_API_HASH', '').strip()
+    phone_number = os.environ.get('TG_PHONE', '').strip()
+    profile_name = os.environ.get('TG_PROFILE', '').strip()
+
+    missing = [name for name, value in (('TG_API_ID', api_id), ('TG_API_HASH', api_hash),
+                                        ('TG_PHONE', phone_number), ('TG_PROFILE', profile_name)) if not value]
+    if missing:
+        logger.error(f"Headless mode needs these environment variables: {', '.join(missing)}")
+        return 2
+
+    profiles = load_profiles()
+    if profile_name not in profiles:
+        logger.error(f"Profile '{profile_name}' not found. Available profiles: {list(profiles.keys())}")
+        return 2
+    config = profiles[profile_name]
+
+    cleanup_old_media()
+
+    session_path = os.path.join(DATA_DIR, 'session_' + phone_number)
+    client = TelegramClient(session_path, api_id, api_hash)
+    forwarder = TelegramForwarder(client, phone_number, interactive=False)
+    forwarder.blacklist = config['blacklist']
+
+    # `docker stop` sends SIGTERM: finish the current poll, then disconnect
+    stop_requested = False
+    def request_stop():
+        nonlocal stop_requested
+        stop_requested = True
+        print(gradient_text("Stop requested, finishing current poll...", MAIN_COLOR_START, MAIN_COLOR_END))
+        forwarder.running = False
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, request_stop)
+        except (NotImplementedError, AttributeError):
+            pass  # Windows event loops don't support signal handlers
+
+    print(gradient_text(f"Soluify headless mode: profile '{profile_name}'", MAIN_COLOR_START, MAIN_COLOR_END, "🚀"))
+    try:
+        await forwarder.forward_messages_to_channels(
+            config['source_chat_ids'], config['destination_channel_ids'], config['keywords'], config['signature'])
+    finally:
+        await client.disconnect()
+
+    # Returning without a stop request means we couldn't connect/authorize; non-zero lets Docker restart us
+    return 0 if stop_requested else 1
+
 if __name__ == "__main__":
+    if os.environ.get('HEADLESS', '').strip().lower() in ('1', 'true', 'yes'):
+        sys.exit(asyncio.run(run_headless()))
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main())

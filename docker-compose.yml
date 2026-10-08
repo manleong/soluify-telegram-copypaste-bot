@@ -1,0 +1,22 @@
+services:
+  soluify:
+    build: .
+    image: soluify-copier
+    container_name: soluify-copier
+    # Keep a TTY so the interactive setup (`docker compose run`) works
+    stdin_open: true
+    tty: true
+    # Only applies to `docker compose up`; `docker compose run` ignores it
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/data
+      - MEDIA_RETENTION_DAYS=${MEDIA_RETENTION_DAYS:-3}
+      - HEARTBEAT_MINUTES=${HEARTBEAT_MINUTES:-10}
+      - TZ=${TZ:-UTC}
+      - HEADLESS=${HEADLESS:-0}
+      - TG_API_ID=${TG_API_ID:-}
+      - TG_API_HASH=${TG_API_HASH:-}
+      - TG_PHONE=${TG_PHONE:-}
+      - TG_PROFILE=${TG_PROFILE:-}
+    volumes:
+      - ${HOST_DATA_PATH:-./data}:/data

@@ -1,10 +1,5 @@
 #
 telethon
 colorama
-pyfiglet
-termcolor
 tqdm
-pyyaml
-prompt_toolkit
-asyncio
 cryptography

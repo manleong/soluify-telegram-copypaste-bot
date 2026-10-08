@@ -46,6 +46,7 @@ Welcome to the **Soluify Telegram Copy & Paste Bot**! 🎉 This isn't just any b
 - **Automatic Retry:** Handles temporary network issues with automatic connection retries.
 - **Colorful UI:** Enjoy a visually appealing interface with gradient text and emojis.
 - **Helpful Guidance:** Built-in help option for easy access to information about using the bot.
+- **Media Housekeeping:** Automatic cleanup of downloaded media files older than a configurable number of days (default: 3 days).
 
 ---
 
@@ -100,6 +101,56 @@ python SoluifyCopier.py
     - **(3) Edit Profile:** Modify existing configuration profiles.
     - **(4) Help:** Access information about how to use the bot.
     - **(5) Exit:** Safely close the application with options to save or delete credentials.
+
+### Docker Deployment
+
+Running in Docker is a two-step workflow: log in **once** interactively, then run **unattended** in the background.
+
+**1. Configure** — copy `.env.example` to `.env` and set `HOST_DATA_PATH`, `TG_API_ID`, `TG_API_HASH` (from [my.telegram.org](https://my.telegram.org)), `TG_PHONE` and `TG_PROFILE`.
+
+**2. One-time setup (interactive)** — log in to Telegram and create a forwarding profile:
+
+```bash
+docker compose build
+docker compose run --rm -e HEADLESS=0 soluify
+```
+
+Use menu option 2 to create and save a profile (its name goes in `TG_PROFILE`), then option 5 and choose to **save** credentials so the session file is kept. The login session is stored in `HOST_DATA_PATH` and reused from then on.
+
+**3. Run unattended** — set `HEADLESS=1` in `.env`, then:
+
+```bash
+docker compose up -d                  # start in the background; restarts automatically
+docker logs -f soluify-copier         # watch forwarding activity
+docker compose down                   # stop
+```
+
+In headless mode the bot skips the menu and password prompt, starts forwarding `TG_PROFILE` immediately, and shuts down cleanly on `docker stop`. If the Telegram session expires or is revoked, the container logs `Session is not authorized` — repeat step 2 to log in again.
+
+> **Protect the data folder.** The `session_<phone>.session` file grants full access to your Telegram account without a password or code. Keep `HOST_DATA_PATH` on a local disk that is not synced to cloud storage, and never commit it.
+
+### Environment Variables
+
+These are read by Docker Compose from `.env` (the script itself reads them from the process environment):
+
+| Variable | Default | Description |
+|---|---|---|
+| `HOST_DATA_PATH` | `./data` | Host folder mounted as `/data` in the container. Use forward slashes on Windows |
+| `DATA_DIR` | `./data` (local) or `/data` (Docker) | Directory for all runtime data: credentials, profiles, sessions, logs, and media cache |
+| `MEDIA_RETENTION_DAYS` | `3` | Automatically delete downloaded media files older than this many days. Set to `0` to disable cleanup |
+| `HEADLESS` | `0` | `1` = start forwarding `TG_PROFILE` with no prompts; `0` = interactive menu |
+| `HEARTBEAT_MINUTES` | `10` | Headless mode: print a "still running" status line with the forwarded count this often. `0` = off |
+| `TZ` | `UTC` | Timezone for log timestamps, e.g. `Asia/Kuala_Lumpur` |
+| `TG_API_ID` / `TG_API_HASH` | — | Telegram API credentials (headless mode only) |
+| `TG_PHONE` | — | Phone number used at login, digits only (headless mode only) |
+| `TG_PROFILE` | — | Name of a saved profile in `telegramconfiguration.json` (headless mode only) |
+
+**How media housekeeping works:**
+- On startup, the bot scans the `media/` folder and removes any files older than `MEDIA_RETENTION_DAYS`.
+- While forwarding is active, cleanup re-runs automatically every 24 hours.
+- Set `MEDIA_RETENTION_DAYS=0` to keep all media files indefinitely.
+
+**Upgrading from an older version:** credentials files created before this version are still read with your existing password and are upgraded automatically on first use (the original is kept as `credentials.json.legacy.bak`). Runtime files now live in the data folder, so move any `credentials.json`, `telegramconfiguration.json` and `session_*.session` files from the script folder into it.
 
 ---
 
